@@ -1,7 +1,10 @@
-function [Unode, f1,local_P1,local_Q1,local_U1]=subnormal1(rho_s,zP,zQ,zU,uP,uQ,uU,PIEEE_1_init,QIEEE_1_init,UjIEEE_1_init,rho_t,max_iteri, tol_i)
-% clear all
-% warning('OFF')
-T=2;
+function [Unode1, f1,local_P1,local_Q1,local_U1,Pch1,Pdis1]=subnormal1(rho_s,rho_t,zP,zQ,zU,uP,uQ,uU,z_soc, lam1, PIEEE_1,QIEEE_1,UjIEEE_1)
+max_iter = 50;
+max_iiter = 50;
+T = 2;               % 时间步长
+rho_s = 5000;
+rho_t = 3000;
+tol =  1e-4;
 %变压器参数设置 
 UTmax=1.05^2;  %电压运行上限
 UTmin=0.95^2;    
@@ -56,7 +59,6 @@ Ldata=[0.0922,0.047;  0.493,0.2511;  0.366,0.1864;  0.3811,0.1941;  0.0819,0.707
 
 Rij=Ldata(1:L,1)/16.02756;
 Xij=Ldata(1:L,2)/16.02756;
-
 %% 定义优化变量及其范围
 % 基本线路节点参数
 %正常配电网1
@@ -71,41 +73,64 @@ subp1=sdpvar(1,T);
 subn1=sdpvar(1,T);
 P_dis1=sdpvar(5,T);
 P_ch1=sdpvar(5,T);
-u_ch1=binvar(Ess_Num1,T);%充电状态
-u_dis1=binvar(Ess_Num1,T); %放电状态
-Ess1=sdpvar(Ess_Num1,T+1);
+u_ch1=sdpvar(Ess_Num1,T);%充电状态
+u_dis1=sdpvar(Ess_Num1,T); %放电状态
+Ess=sdpvar(Ess_Num1,T+1);
 PIEEE_1=sdpvar(1,T);
 QIEEE_1=sdpvar(1,T);
 UjIEEE_1=sdpvar(1,T);
+
+Ess_var = 0.6*ones(Ess_Num1, T+1); 
+lam1 = zeros(Ess_Num1, T+1); r = zeros(Ess_Num1, T);
 %储能充放电参数
 P_essmax=2*1.5/10; % 充放最大功率  基值是10MW
+
 %% 优化目标
 for t=1:T
-  
+  % Ess(:,t)=z_soc(:,t); Ess(:,t+1)=z_soc(:,t+1);
 Cl=5000;Cp=4000;Cpv=7000;Cb=0.5;%有功缩减成本
 Ce=4000;
   R=repmat(Rij,1,T);
-  
   lost1=Lij1.*R;
  
+
    f_l1=Cp*(sum(sum(lost1)));
   f_pv1=Cpv*(sum(Pdec1));
    f_ess1=Ce*sum(P_ch1(:)) + Ce*sum(P_dis1(:));
    f_a=0.5*rho_s*(PIEEE_1(1,t)-zP(t)+uP(t))^2+0.5*rho_s*(QIEEE_1(1,t)-zQ(t)+uQ(t))^2+0.5*rho_s*(UjIEEE_1(1,t)-zU(t)+uU(t))^2;
-
+    % f_c=0.5*rho_t *(Ess - z_soc +lam1).^2 + 0.5*rho_t *(Ess - z_soc + lam1).^2;
+    % f_c=0.5*rho_t *(r(:,t+1) - r(:,t) +lam1).^2 + 0.5*rho_t *(r(:,t+1) - r(:,t) + lam1).^2;
 %   f_l=Cp*(sum(sum(lost(:,1:T))));
  
 
-  f1 =  f_l1+ f_pv1 + f_ess1 + f_a;
+  f1 =  f_l1+ f_pv1 + f_ess1 + f_a; %+ f_c;
 
 end
-% 内层 ADMM 变量：内层乘子 v 
-Ess_guess = repmat(0.6*ones(Ess_Num1,1),1,T+1); % 初始为 0.6
-V_t = zeros(Ess_Num1, T); 
+
 % ADMM 内层循环：交替固定 Ess 求解网络 + 固定 Pch,Pdis 求解 Ess
-for iteri = 1:max_iteri
+for inner_iter = 1:max_iiter
+    [Unode1, f1,local_P1,local_Q1,local_U1,Pch1,Pdis1]=...
+    subnormal1(Ess_var,zP,zQ,zU,uP,uQ,uU, lam1, PIEEE_1,QIEEE_1,UjIEEE_1);
  % Step 1: 固定 Ess_guess，求解网络变量（包含 P_ch,P_dis）
  % 我们在约束中强制 Ess1 == Ess_guess (固定)，从而网络方程中不再有跨时耦合
+for t = 1:T
+        r(:,t) = Ess_var(:,t+1) - (Ess_var(:,t) + 0.9*Pch1(:,t) - 1.11*Pdis1(:,t));
+end
+Ess_var_old = Ess_var;
+    for t = 1:T
+        Ess_var(:, t+1) = Ess_var(:,t) + 0.9*Pch1(:,t) - 1.11*Pdis1(:,t) - lam1(:,t)/rho_t;
+    end
+
+     % 投影到约束范围
+    Ess_var = min(max(Ess_var, 0.2), 0.9);
+    Ess_var(:,1) = 0.6;                % 初始SOC
+    Ess_var(:,end) = min(max(Ess_var(:,end), 0.4), 0.6);
+      for t = 1:T
+        lam1(:,t) = lam1(:,t) + rho_t*r(:,t);
+    end
+
+    Ess_hist(:,:,inner_iter) = Ess_var;
+
 %% 约束条件
 %正常配电网
 F=[];
@@ -123,14 +148,17 @@ for t=1:T
 end
 %储能约束
       F = [F;
-          u_dis1(:,t)+u_ch1(:,t)<=1;       u_dis1(:,t)+u_ch1(:,t)>=0;%表示充电，放电，不充不放三种状态
+          
+          u_dis1(:)+u_ch1(:)<=1;       u_dis1(:)+u_ch1(:)>=0;%表示充电，放电，不充不放三种状态
           P_dis1(:,t)>=0;P_dis1(:,t)<=u_dis1(:,t)*P_essmax;%储能放电功率约束
           P_ch1(:,t)>=0;P_ch1(:,t)<=u_ch1(:,t)*P_essmax;%储能放电功率约束
           % Ess1(:,1)==0.6;     
           % Ess1(:,t)>=0.2; Ess1(:,t)<=0.9;
           % Ess1(:,T+1)>=0.4; Ess1(:,T+1)<=0.6; 
-          Ess1(:,t) == Ess_guess(:,t);  % fix SOC 
-          Ess1(:,t+1) == Ess_guess(:,t+1);
+          % Ess1(:,t) == Ess_guess(:,t);  % fix SOC 
+          % Ess1(:,t+1) == Ess_guess(:,t+1);
+            % Ess(:,t+1)==Ess(:,t)+0.9*P_ch1(:,t)-1.11*P_dis1(:,t); 
+
 
     ];  
 %多时段程序
@@ -143,7 +171,7 @@ F=[F;
 %       subp(1,t)-subn(1,t)==Pij1(1,t)/12
         subp1(1,t)>=0;
         subn1(1,t)>=0;   
-         Uj1(24,t) == UjIEEE_1(1,t);
+        Uj1(24,t) == UjIEEE_1(1,t);
 %正常配电网多时间尺度各段线路的潮流等式方程
         Pij1(1,t)- Lij1(1,t)*Rij(1)-Pj(1,t)==Pij1(2,t)+Pij1(18,t);
         Pij1(2,t)- Lij1(2,t)*Rij(2)-Pj(2,t)==Pij1(3,t)+Pij1(22,t);
@@ -330,61 +358,30 @@ for t=1:T
     UTmin*(1-bk_1(:,cc))<=UT1(1,cc)-Uc_1(:,cc);  UT1(1,cc)-Uc_1(:,cc)<=UTmax*(1-bk_1(:,cc));%对于未选中档位的约束
 
 ];
- end
+end
 
+end
 %% 调用求解器计算潮流
         
 
        options=sdpsettings('solver','gurobi') ;      
        optimize(F,  f1,  options);  
        TF=strcmp(ans.info,'Successfully solved (GUROBI)');
-%         options=sdpsettings('solver','gurobi');   
-%         optimize(F,  f,  options);        
-%         TF=strcmp(ans.info,'Successfully solved (GUROBI)');
-      Unode=sqrt(value(Uj1));  f=value(f1);
-   % Pdecnode=value(Pdec1); Qdecnode=value(Qdec1); 
-   % Pijnode=value(Pij1); Qijnode=value(Qij1);  
-   local_P1=value(PIEEE_1);local_Q1=value(QIEEE_1);local_U1=value(UjIEEE_1);
+       % 检查收敛性
+    prim_res = norm(Ess_var - Ess_var_old, 'fro');
+    fprintf('ADMM iter %d: primal_residual = %.3e\n', inner_iter, prim_res);
+    if prim_res < tol
+        disp('ADMM Converged');
       
-    Pch_val = value(P_ch1);       % Ess_Num1 x T
-    Pdis_val = value(P_dis1);
-% Step 2: 固定 Pch,Pdis，更新 Ess（内层 ADMM 的 y 和 v）
-%where r_t = Ess(:,t+1) - (Ess(:,t) + 0.9*Pch - 1.11*Pdis)
-  r = zeros(Ess_Num1, T);
-    for t = 1:T
-        r(:,t) = Ess_guess(:,t+1) - (Ess_guess(:,t) + 0.9*Pch_val(:,t) - 1.11*Pdis_val(:,t));
     end
-    % 内层 ADMM 的 y 更新（这里简单用平均）
-    y = r + V_time;
-    
-    % v 更新
-    V_time = V_time + (r - y);
-    Ess_var = sdpvar(Ess_Num1, T+1,'full');
-    F_ess = [];
-    obj_ess = 0;
-    for t=1:T
-        % dynamic residual:
-        dyn_res = Ess_var(:,t+1) - (Ess_var(:,t) + 0.9*Pch_val(:,t) - 1.11*Pdis_val(:,t));
-        obj_ess = obj_ess + (rho_t/2)*sum((dyn_res(:) + V_time(:,t)).^2);
-    end
-    F_ess = [F_ess; Ess_var(:,1) == 0.6];
-    for t=1:T
-        F_ess = [F_ess; 0.2 <= Ess_var(:,t) <= 0.9];
-    end
-    F_ess = [F_ess; 0.4 <= Ess_var(:,T+1) <= 0.6];
-    Ess_new = value(Ess_var);
-    % 计算内层残差
-    inner_primal = norm(reshape(Ess_new - Ess_guess,[],1),2);
-    % 更新 Ess_guess
-    Ess_guess = Ess_new;
-    fprintf('  subnormal inner iter %d: inner_primal=%.3e\n', iteri, inner_primal);
 
-    if inner_primal < tol_i
-        fprintf('  subnormal inner ADMM 收敛 at iter %d\n', iteri);
-        break;
-    end
-  
+      Unode1=sqrt(value(Uj1));
+
+    local_P1=value(PIEEE_1);local_Q1=value(QIEEE_1);local_U1=value(UjIEEE_1);  
+    Pch1= value(P_ch1);Ess1 = value(Ess);
+    Pdis1= value(P_dis1);
+    local_P1(t) = 0;
+    local_Q1(t) = 0;
+    local_U1(t) = 1.0; 
+
 end
-
-
- 
