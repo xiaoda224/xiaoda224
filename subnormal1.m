@@ -1,5 +1,5 @@
-function [Unode1, f1,local_P1,local_Q1,local_U1,Pch1,Pdis1]=subnormal1(rho_s,rho_t,zP,zQ,zU,uP,uQ,uU,z_soc, lam1, PIEEE_1,QIEEE_1,UjIEEE_1)
-max_iter = 50;
+function [Unode1, f1,local_P1,local_Q1,local_U1,Pch1,Pdis1,z_soc1_hist]=subnormal1(zP,zQ,zU,uP,uQ,uU,  PIEEE_1,QIEEE_1,UjIEEE_1)
+max_iter = 100;
 max_iiter = 50;
 T = 2;               % 时间步长
 rho_s = 5000;
@@ -75,19 +75,26 @@ P_dis1=sdpvar(5,T);
 P_ch1=sdpvar(5,T);
 u_ch1=sdpvar(Ess_Num1,T);%充电状态
 u_dis1=sdpvar(Ess_Num1,T); %放电状态
-Ess=sdpvar(Ess_Num1,T+1);
+Ess1=sdpvar(Ess_Num1,T+1);
 PIEEE_1=sdpvar(1,T);
 QIEEE_1=sdpvar(1,T);
 UjIEEE_1=sdpvar(1,T);
 
-Ess_var = 0.6*ones(Ess_Num1, T+1); 
-lam1 = zeros(Ess_Num1, T+1); r = zeros(Ess_Num1, T);
 %储能充放电参数
 P_essmax=2*1.5/10; % 充放最大功率  基值是10MW
+z_soc1 = 0.6*ones(Ess_Num1, T+1);%全局soc变量
+Ess1_local = 0.6*ones(Ess_Num1, T+1);%局部soc变量
+lam1 = zeros(Ess_Num1, T+1); %soc拉格朗日乘子
+z_soc1_hist = zeros(Ess_Num1, T+1, max_iiter);
+for k=1:max_iiter
+    fprintf('===ADMM step %d===\n',k);
+
+    [Unode1, f1,local_P1,local_Q1,local_U1,Pch1,Pdis1,z_soc1_hist]=...
+    subnormal1(z_soc1, lam1,rho_t );
 
 %% 优化目标
 for t=1:T
-  % Ess(:,t)=z_soc(:,t); Ess(:,t+1)=z_soc(:,t+1);
+   Ess1(:,t)=z_soc1(:,t); Ess1(:,t+1)=z_soc1(:,t+1);
 Cl=5000;Cp=4000;Cpv=7000;Cb=0.5;%有功缩减成本
 Ce=4000;
   R=repmat(Rij,1,T);
@@ -100,36 +107,15 @@ Ce=4000;
    f_a=0.5*rho_s*(PIEEE_1(1,t)-zP(t)+uP(t))^2+0.5*rho_s*(QIEEE_1(1,t)-zQ(t)+uQ(t))^2+0.5*rho_s*(UjIEEE_1(1,t)-zU(t)+uU(t))^2;
     % f_c=0.5*rho_t *(Ess - z_soc +lam1).^2 + 0.5*rho_t *(Ess - z_soc + lam1).^2;
     % f_c=0.5*rho_t *(r(:,t+1) - r(:,t) +lam1).^2 + 0.5*rho_t *(r(:,t+1) - r(:,t) + lam1).^2;
+     f_c=0.5*rho_t* sum(sum((Ess1 - z_soc1 +lam1).^2));
 %   f_l=Cp*(sum(sum(lost(:,1:T))));
  
 
-  f1 =  f_l1+ f_pv1 + f_ess1 + f_a; %+ f_c;
+  f1 =  f_l1+ f_pv1 + f_ess1 + f_a + f_c;
 
 end
 
-% ADMM 内层循环：交替固定 Ess 求解网络 + 固定 Pch,Pdis 求解 Ess
-for inner_iter = 1:max_iiter
-    [Unode1, f1,local_P1,local_Q1,local_U1,Pch1,Pdis1]=...
-    subnormal1(Ess_var,zP,zQ,zU,uP,uQ,uU, lam1, PIEEE_1,QIEEE_1,UjIEEE_1);
- % Step 1: 固定 Ess_guess，求解网络变量（包含 P_ch,P_dis）
- % 我们在约束中强制 Ess1 == Ess_guess (固定)，从而网络方程中不再有跨时耦合
-for t = 1:T
-        r(:,t) = Ess_var(:,t+1) - (Ess_var(:,t) + 0.9*Pch1(:,t) - 1.11*Pdis1(:,t));
-end
-Ess_var_old = Ess_var;
-    for t = 1:T
-        Ess_var(:, t+1) = Ess_var(:,t) + 0.9*Pch1(:,t) - 1.11*Pdis1(:,t) - lam1(:,t)/rho_t;
-    end
 
-     % 投影到约束范围
-    Ess_var = min(max(Ess_var, 0.2), 0.9);
-    Ess_var(:,1) = 0.6;                % 初始SOC
-    Ess_var(:,end) = min(max(Ess_var(:,end), 0.4), 0.6);
-      for t = 1:T
-        lam1(:,t) = lam1(:,t) + rho_t*r(:,t);
-    end
-
-    Ess_hist(:,:,inner_iter) = Ess_var;
 
 %% 约束条件
 %正常配电网
@@ -152,12 +138,12 @@ end
           u_dis1(:)+u_ch1(:)<=1;       u_dis1(:)+u_ch1(:)>=0;%表示充电，放电，不充不放三种状态
           P_dis1(:,t)>=0;P_dis1(:,t)<=u_dis1(:,t)*P_essmax;%储能放电功率约束
           P_ch1(:,t)>=0;P_ch1(:,t)<=u_ch1(:,t)*P_essmax;%储能放电功率约束
-          % Ess1(:,1)==0.6;     
-          % Ess1(:,t)>=0.2; Ess1(:,t)<=0.9;
-          % Ess1(:,T+1)>=0.4; Ess1(:,T+1)<=0.6; 
+          Ess1(:,1)==0.6;     
+          Ess1(:,t)>=0.2; Ess1(:,t)<=0.9;
+          Ess1(:,T+1)>=0.4; Ess1(:,T+1)<=0.6; 
           % Ess1(:,t) == Ess_guess(:,t);  % fix SOC 
           % Ess1(:,t+1) == Ess_guess(:,t+1);
-            % Ess(:,t+1)==Ess(:,t)+0.9*P_ch1(:,t)-1.11*P_dis1(:,t); 
+           Ess1_local(:,t+1)==z_soc1(:,t)+0.9*P_ch1(:,t)-1.11*P_dis1(:,t); 
 
 
     ];  
@@ -360,28 +346,37 @@ for t=1:T
 ];
 end
 
-end
 %% 调用求解器计算潮流
         
 
        options=sdpsettings('solver','gurobi') ;      
        optimize(F,  f1,  options);  
        TF=strcmp(ans.info,'Successfully solved (GUROBI)');
-       % 检查收敛性
-    prim_res = norm(Ess_var - Ess_var_old, 'fro');
-    fprintf('ADMM iter %d: primal_residual = %.3e\n', inner_iter, prim_res);
-    if prim_res < tol
-        disp('ADMM Converged');
+
+   for t = 1:T
+        z_soc1_new(:,t+1) = Ess1_local(:,t+1)+lam1(:,t+1)/rho_t;
+        % z_soc_new = Ess_local+lam2/rho_t;
+        z_soc1_new = min(max(z_soc1_new(:,t+1),0.2),0.9) ;  
+        z_soc1_new(:,1) = 0.6;   %初始soc
+        z_soc1_new(:,end) = min(max(z_soc1_new(:,end),0.4),0.6) ;%终端约束
+  %乘子更新
+        lam1(:,t) = lam1(:,t)+ rho_t*(Ess1_local(:,t)-z_soc1_new(:,t));
+ end
+%检查收敛性
+
+    prim_res = norm( Ess1_local - z_soc1_new , 'fro');
+    dual_res = norm( z_soc1_new -z_soc1, 'fro');
+    fprintf('ADMM iter %d: primal_res = %.3e,dual_res = %.3e\n',prim_res,dual_res );
+    z_soc1_hist(:,:,k)=z_soc1_new;
+    z_soc1 = z_soc1_new;%次轮主变量
+    if (prim_res < tol)&&(dual_res < tol)
+        disp('ADMM 收敛');
       
     end
-
+end
       Unode1=sqrt(value(Uj1));
 
     local_P1=value(PIEEE_1);local_Q1=value(QIEEE_1);local_U1=value(UjIEEE_1);  
     Pch1= value(P_ch1);Ess1 = value(Ess);
     Pdis1= value(P_dis1);
-    local_P1(t) = 0;
-    local_Q1(t) = 0;
-    local_U1(t) = 1.0; 
-
 end

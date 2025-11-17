@@ -9,7 +9,6 @@ rho_s = 5000;
 rho_t = 3000;
 eta_beta = 0.3;        % 残差/变量平滑因子（指数移动平均），越小平滑越强
 lambda_beta = 200;     % 使 beta 向 0/1 集中之凸二次
-Ess_Num1=5;Ess_Num=3;
 
 %% 初始化 松弛二进制变量及其平滑版本
 beta_prev = 0.5*ones(nbeta,1);    % 上一轮 beta（平滑用）
@@ -31,48 +30,28 @@ r_hist = []; s_hist = []; obj_hist = [];
 beta2_hist = [];
 fprintf('ADMM主循环（边界联络线共识协调）\n');
 
-%% SOC相关一致性变量及对偶
-% z_soc = 0.6 * ones(max(Ess_Num1,Ess_Num), T+1);     % 全局SOC一致性变量
-lam1 = zeros(Ess_Num1, T+1);   % 正常网对偶
-lam2 = zeros(Ess_Num, T+1);   % 故障网对偶
-% 保存收敛
-% prim_soc_hist = [];
-% dual_soc_hist = [];
-
 for k = 1:max_iter
     fprintf('---------- ADMM 第 %d 轮 ----------\n', k);
-    %% 子网一：正常网（24节点出口边界），带惩罚项与乘子变量
-    [~, f1, local_P1, local_Q1, local_U1,Ess1] = subnormal1( ...
-        rho_s,rho_t, zP, zQ, zU, uP, uQ, uU, ...    % ADMM参数
-        lam1 ...                        % 边界初值
-    );
-% fprintf('  subnormal1 返回：f1=%.4f, local_P1(1) = %.4f\n', f1, local_P1(1));
-    %% 子网二：故障网（21节点入口边界），带惩罚项与乘子变量
-    [~, f2, local_P2, local_Q2, local_U2,beta2,alphaIEEE_12,Ess2] = subguzhang( ...
-        rho_s, rho_t, zP, zQ, zU, lamdaP, lamdaQ, lamdaU, ...    % ADMM参数
-         lam2  ...                        % 边界初值
-    );
-% fprintf('  subguzhang 返回：f2=%.4f, local_P2(1) = %.4f\n', f2, local_P2(1));
 
-% -------- Step 2 SOC一致性主变量更新 --------
-    % z_new = zeros(size(z_soc));
-    % count = zeros(size(z_soc));
-    % z_new(1:Ess_Num1,:) = Ess1 + lam1/rho_t; count(1:Ess_Num1,:) = count(1:Ess_Num1,:) + 1;
-    % z_new(1:Ess_Num,:) = z_new(1:Ess_Num,:) + Ess2 + lam2/rho_t; count(1:Ess_Num,:) = count(1:Ess_Num,:) + 1;
-    % z_soc = z_new ./ max(count,1);
-    % % 边界条件
-    % z_soc(:,1) = 0.6;
-    % z_soc(:,end) = min(max(z_soc(:,end),0.4),0.6);
-    % z_soc = min(max(z_soc,0.2),0.9);
-%%SOC对偶变量更新 --------
-    % lam1 = lam1 + rho_t*(Ess1 - z_soc(1:Ess_Num1,:));
-    % lam2 = lam2 + rho_t*(Ess2 - z_soc(1:Ess_Num,:));
+    %% 子网一：正常网（24节点出口边界），带惩罚项与乘子变量
+    [~, f1, local_P1, local_Q1, local_U1,Pch1,Pdis1,z_soc1_hist] = subnormal1( ...
+       zP, zQ, zU, uP, uQ, uU, ...    % ADMM参数
+        zP, zQ, zU ...                        % 边界初值
+    );
+
+    %% 子网二：故障网（21节点入口边界），带惩罚项与乘子变量
+    [~, f2, local_P2, local_Q2, local_U2,beta2,alphaIEEE_12,z2,P_chf,P_disf,z_soc_hist] = subguzhang1( ...
+       zP, zQ, zU, lamdaP, lamdaQ, lamdaU, ...    % ADMM参数
+        zP, zQ, zU...                        % 边界初值
+    );
+
+
    %% 对故障网的松弛二进制变量做指数移动平均平滑
     beta_smoothed = eta_beta * beta2 + (1-eta_beta) * beta_prev;
     alpha_smoothed = eta_beta * alphaIEEE_12 + (1-eta_beta) * alphaIEEE_prev;
     %% 局部变量（边界值）汇总
-    p1 = local_P1(:).'; q1 = local_Q1(:).'; u1 = local_U1(:).';
-    p2 = local_P2(:).'; q2 = local_Q2(:).'; u2 = local_U2(:).';
+    p1 = local_P1(:); q1 = local_Q1(:); u1 = local_U1(:);
+    p2 = local_P2(:); q2 = local_Q2(:); u2 = local_U2(:);
 
     %% 共识变量更新（简单加权平均/可自定义）
     zP_prev = zP; zQ_prev = zQ; zU_prev = zU;
@@ -107,17 +86,11 @@ for k = 1:max_iter
     alphaIEEE_prev = alpha_smoothed;
 
     %% 输出迭代信息
-    % fprintf('  外层iter%d：原始残差 ||r|| = %.4e, 对偶残差 ||s|| = %.4e, 总目标 = %.4e\n', r_norm, s_norm, f1+f2);
- %%SOC一致性收敛监控 ---------
-    % prim_soc = norm(Ess1 - z_soc(1:Ess_Num1,:), 'fro') + norm(Ess2 - z_soc(1:Ess_Num,:), 'fro');
-    % dual_soc = norm(z_soc - z_new./max(count,1), 'fro');
-    % prim_soc_hist = [prim_soc_hist, prim_soc];
-    % dual_soc_hist = [dual_soc_hist, dual_soc];
-
+    % fprintf('  原始残差 ||r|| = %.4e, 对偶残差 ||s|| = %.4e, 总目标 = %.4e\n', r_norm, s_norm, f1+f2);
 
     %% 收敛判据
     if r_norm < tol && s_norm < tol
-        fprintf('外层ADMM收敛于第 %d 轮\n', k);
+        fprintf('ADMM收敛于第 %d 轮\n', k);
         break;
     end
 end
@@ -135,5 +108,4 @@ figure;
 subplot(3,1,1); plot(r_hist,'-o'); ylabel('原始残差||r||');
 subplot(3,1,2); plot(s_hist,'-o'); ylabel('对偶残差||s||');
 subplot(3,1,3); plot(obj,'-o'); ylabel('总目标');
-% subplot(4,1,4); plot(prim_soc_hist,'-o'); ylabel('SOC一致性残差');
 xlabel('ADMM次数');
